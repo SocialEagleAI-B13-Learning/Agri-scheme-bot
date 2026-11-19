@@ -1,24 +1,38 @@
-# Krishi-Sahayak: Agricultural Scheme Assistant
+# வேளாண் வழிகாட்டி (Velaan Vazhikaatti): Agricultural Scheme Assistant
 
-Krishi-Sahayak is a retrieval-augmented question-answering app for agricultural scheme documents. It searches PDF files, uses OpenAI embeddings and a language model to form an answer, and displays the source PDF and page references. The project includes a FastAPI backend and a Streamlit chat interface.
+Velaan Vazhikaatti is a retrieval-augmented question-answering app for agricultural scheme documents. It searches PDF files, uses OpenAI embeddings and a language model to form an answer, and displays the source PDF and page references. Questions can be asked in English, Tamil, or Tanglish, and the answer is returned in the same language. The project includes a FastAPI backend with layered security guardrails and a Streamlit "Schemes Hub" interface with a pop-up AI chatbot.
 
 ## How it works
 
 1. PDFs in `agri-rag-bot/pdfs/` are loaded and split into overlapping text chunks.
 2. OpenAI `text-embedding-3-small` embeddings are stored in a local FAISS index at `agri-rag-bot/faiss_index/`.
-3. For each question, the backend retrieves the four most relevant chunks and asks `gpt-4o-mini` to answer using only those documents.
-4. The frontend displays the answer and source PDF/page references.
+3. Each question first passes an **input guardrail**: a length check (3–500 characters), a prompt-injection pattern filter, and a lightweight LLM topic/safety classifier that only allows agriculture- and scheme-related queries (or greetings) in English, Tamil, or Tanglish.
+4. For allowed questions, the backend retrieves the four most relevant chunks and asks `gpt-4o-mini` (temperature 0.0) to answer using only those documents, with a hardened grounded prompt that mandates PDF filename and page citations and replies in the user's language.
+5. An **output sanitizer** masks accidental Aadhaar-like 12-digit numbers before the answer is returned.
+6. The frontend displays the answer and source PDF/page references.
 
 The answer is limited to the documents in the local knowledge base; it does not fetch current information from the web.
+
+## Security guardrails
+
+The backend (`backend/rag_engine.py`) applies three layers of protection around every question:
+
+| Layer | What it does |
+|---|---|
+| 1. Input validation & injection filter | Rejects questions shorter than 3 or longer than 500 characters; blocks common prompt-injection phrases (e.g., "ignore previous instructions", "reveal your system prompt", "jailbreak"); runs an LLM classifier that only allows agriculture/scheme-related queries or greetings. Blocked queries get a polite refusal message instead of an answer. |
+| 2. Hardened grounded prompt | The system prompt enforces strict grounding (answer only from retrieved context, never invent amounts/dates/URLs), treats user input as untrusted, requires PDF filename and page-number citations for every claim, provides a safe fallback when the context has no answer, and matches the reply language (Tamil script, Tanglish, or English) to the question. |
+| 3. Output sanitizer | Masks Aadhaar-like 12-digit number patterns in the generated answer as `[REDACTED-ID]`. |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     User["User"]
-    UI["Streamlit frontend<br/>frontend/app.py"]
+    UI["Streamlit Schemes Hub<br/>frontend/app.py"]
     API["FastAPI backend<br/>backend/main.py"]
-    RAG["RAG engine<br/>backend/rag_engine.py"]
+    Guard["Input guardrail<br/>length + injection filter + LLM classifier"]
+    RAG["Grounded RAG engine<br/>backend/rag_engine.py"]
+    Sanitize["Output sanitizer<br/>masks Aadhaar-like numbers"]
     Index[("Local FAISS index<br/>faiss_index/")]
     PDFs[("Scheme PDFs<br/>pdfs/")]
     Ingest["PDF ingestion<br/>ingest.py"]
@@ -28,12 +42,15 @@ flowchart LR
 
     User -->|"Ask question / upload PDF"| UI
     UI -->|"HTTP request"| API
-    API -->|"Question"| RAG
+    API -->|"Question"| Guard
+    Guard -->|"Blocked: refusal message"| API
+    Guard -->|"Allowed question"| RAG
     RAG -->|"Embed query and search"| Index
     Index -->|"Top 4 relevant chunks"| RAG
     RAG -->|"Context + question"| LLM
     LLM -->|"Answer"| RAG
-    RAG -->|"Answer + PDF/page sources"| API
+    RAG -->|"Raw answer"| Sanitize
+    Sanitize -->|"Safe answer + PDF/page sources"| API
     API -->|"JSON response"| UI
     UI -->|"Display answer and citations"| User
 
@@ -52,21 +69,21 @@ The solid arrows show the normal question-answering and indexing flows. Dashed a
 | Tool or technology | How this project uses it |
 |---|---|
 | Python | Programming language used for the backend, frontend, and PDF indexing script. |
-| Streamlit | Builds the browser-based chat interface and PDF upload control in `frontend/app.py`. |
+| Streamlit | Builds the browser-based "Schemes Hub" in `frontend/app.py`: a pop-up AI chatbot with quick prompts in English/Tamil/Tanglish, scheme highlight cards with links to official portals (TNAU, PMKSY, Dept. of Agriculture & Farmers Welfare), and a sidebar PDF upload control. |
 | FastAPI | Implements the backend web server and HTTP endpoints in `backend/main.py`. |
 | Uvicorn | Runs the FastAPI server during development. |
 | HTTP API (REST-style) | Lets the frontend send questions and PDF uploads to the backend. For example, `POST /ask` accepts a question and returns an answer and sources. |
 | `requests` | Makes HTTP calls from the Streamlit frontend to the FastAPI backend. |
 | LangChain | Connects the PDF loader, text splitter, embeddings, FAISS retriever, prompt, and language model into the RAG workflow. |
-| OpenAI API | Creates text embeddings with `text-embedding-3-small` and generates answers with `gpt-4o-mini`. |
+| OpenAI API | Creates text embeddings with `text-embedding-3-small`, classifies incoming questions for the input guardrail, and generates grounded answers with `gpt-4o-mini` (temperature 0.0). |
 | FAISS | Stores and searches document vectors locally in `faiss_index/`; this is a vector index, not a traditional SQL database. |
 | PyPDF / `PyPDFLoader` | Reads PDF pages and retains page metadata used for source citations. |
 | `python-dotenv` | Loads `OPENAI_API_KEY` from the local `.env` file. |
 
 ### What frontend, backend, and API mean here
 
-- **Frontend:** The part a person interacts with in their web browser. Here, Streamlit displays the chat, sample questions, answers, and PDF upload control.
-- **Backend:** The server-side part that handles requests and performs application work. Here, FastAPI validates questions and uploads, while the RAG engine searches the index and calls OpenAI.
+- **Frontend:** The part a person interacts with in their web browser. Here, Streamlit displays the Schemes Hub with scheme highlight cards, a pop-up AI chatbot with quick prompts, answers with citations, and a sidebar PDF upload control.
+- **Backend:** The server-side part that handles requests and performs application work. Here, FastAPI validates questions and uploads, while the RAG engine applies security guardrails, searches the index, and calls OpenAI.
 - **API:** The defined communication interface between frontend and backend. The frontend sends an HTTP request to an endpoint such as `POST /ask`; the backend returns structured JSON containing the answer and source references.
 - **RAG (retrieval-augmented generation):** The approach used to answer questions: retrieve relevant passages from the project's PDFs, then give those passages to the language model as context for its answer.
 - **Embedding:** A numerical representation of text that lets the system find passages with similar meaning, even when they do not use exactly the same words as the question.
@@ -76,13 +93,13 @@ The solid arrows show the normal question-answering and indexing flows. Dashed a
 
 ### Inputs
 
-- **User question:** A question entered in the Streamlit chat, such as “What subsidy is available for farm machinery?” The frontend sends it to the backend as JSON: `{"question": "..."}`.
+- **User question:** A question entered in the pop-up chatbot in English, Tamil, or Tanglish (3–500 characters), such as "What subsidy is available for farm machinery?" or "Machinery subsidy evalavu?". The frontend sends it to the backend as JSON: `{"question": "..."}`. Quick-prompt buttons and scheme highlight cards can queue a sample question automatically.
 - **Scheme PDFs:** Documents in `pdfs/` provide the source content. Users can also upload a PDF through the frontend; the backend saves it and rebuilds the FAISS index.
 - **OpenAI API key:** `OPENAI_API_KEY` in the local `.env` file authorizes calls to OpenAI for embeddings and answer generation. It is configuration, not a chat input.
 
 ### Outputs
 
-- **Answer:** A response generated from the relevant passages retrieved from the indexed PDFs. If the documents do not provide the requested information, the assistant is instructed to say so.
+- **Answer:** A grounded response in the user's language (English, Tamil, or Tanglish) generated from the relevant passages retrieved from the indexed PDFs, with inline PDF filename and page citations. If the documents do not provide the requested information, the assistant says so and points to official portals. Off-topic, unsafe, or injection-style questions receive a guardrail refusal message instead.
 - **Source references:** The PDF filename and page number associated with retrieved passages, returned by the API and displayed below the answer.
 - **Updated search index:** PDF ingestion or upload rebuilds the local FAISS index so the documents can be searched. Restart the backend after an upload so it loads the rebuilt index.
 
@@ -94,9 +111,9 @@ The solid arrows show the normal question-answering and indexing flows. Dashed a
 └── agri-rag-bot/
     ├── backend/
     │   ├── main.py          # FastAPI API
-    │   └── rag_engine.py    # FAISS retrieval and answer generation
+    │   └── rag_engine.py    # Guardrails, FAISS retrieval, and answer generation
     ├── frontend/
-    │   └── app.py           # Streamlit chat interface
+    │   └── app.py           # Streamlit Schemes Hub with pop-up chatbot
     ├── faiss_index/         # Persisted vector index
     ├── pdfs/                # Source scheme PDFs
     ├── ingest.py            # Build/rebuild the vector index
@@ -190,8 +207,10 @@ Uploaded PDFs are saved under `pdfs/`. After uploading a PDF, restart the backen
 - **FAISS index not found:** From `agri-rag-bot`, activate the environment and run `python ingest.py`.
 - **Frontend cannot connect:** Confirm the backend is running at `http://127.0.0.1:8000` before starting or using Streamlit.
 - **New or edited PDFs do not appear in answers:** Rebuild the index with `python ingest.py`, then restart the backend. After using the upload control, restart the backend as well.
+- **Question refused with a guardrail notice:** The input guardrail blocks questions that are too short/long (3–500 characters), look like prompt injection, or are unrelated to agriculture, farming, or government schemes. Rephrase the question around schemes, subsidies, eligibility, or farming support.
 
 ## Notes
 
 - Answers depend on the coverage and quality of the PDFs provided. Verify important eligibility, subsidy, and application details against the original documents.
+- Each question makes two OpenAI chat calls (one for the guardrail classifier, one for the answer) plus one embedding call, so per-question usage is slightly higher than a plain RAG setup.
 - The API is configured for local development and does not include authentication. Do not expose it directly to the public internet.
